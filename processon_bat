@@ -1,0 +1,317 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Sep 26 13:52:54 2017
+
+@author: luhongkai
+"""
+import os
+import re
+import pickle
+import pandas as pd
+import numpy as np
+import scipy.signal as sps
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
+matplotlib.style.use('KLplot')
+from da.preprocess import *
+
+
+class batch():
+    '''
+    批量计算函数，批量计算一个版本号下的所有设备
+    
+    parameters 
+    ==========
+    input:  filepath 版本号文件路径，\n
+            eq 额定容量，\n
+            sver 版本号 例:5222\n
+            SvnPath 默认值'D:/数据分析' SVN文件夹路径\n
+            templim 默认值[低温告警值,5,25,40,高温告警值] 温度范围分区\n
+            alarmpath 默认值'file:///D:/数据分析/数据/alarm/sver_5222_device_alarm_20170824.csv' 告警数据文件路径
+          
+    output:self.initdf 版本号下所有设备批量计算的结果，8张表\n
+                [0] onlinedates 所有车辆上线及在线情况\n
+                [1] newcharges 所有车辆充电段信息（包含网格搜索后固定条件下的容量）\n
+                [2] discharges 所有车辆放电信息\n
+                [3] summarys 所有车辆混合信息\n
+                [4] curbydays 所有车辆curbyday汇总\n
+                [5] stops 所有车辆停车信息\n
+                [6] tempbydays 所有车辆tempbyday汇总\n
+                [7] alarm 所有车辆告警信息汇总
+    '''
+    def __init__(self,filepath,eq,sver,SvnPath='D:/数据分析',alarmpath='file:///D:/数据分析/数据/alarm/sver_5222_device_alarm_20170824.csv'):
+        '''
+        一：初始化 \n
+        二：导入告警表数据\n
+           导入阈值信息\n
+           生成self.templim [低温告警值,5,25,40,高温告警值] 温度统计范围 
+        
+        parameters
+        ==========
+        input:  self.filepath 版本号文件路径\n
+                self.eq 额定容量\n
+                self.alarmpath 告警数据文件路径\n
+                
+        output: self.initdf 版本号下所有设备批量计算的结果，8张表
+                self.templim [低温告警值,5,25,40,高温告警值] 温度统计范围
+
+        '''
+        
+        self.filepath=filepath
+        self.eq=eq
+        
+        self.sver = sver
+        
+        #导入告警表数据
+        SVNalarm=SvnPath+'/数据/alarm/'
+        dir = os.fsencode(SVNalarm)
+        pathList=os.listdir(dir)
+        
+        alarmfile=re.compile(r"'").split(str(pathList[pathList==sver]))[1]
+        alarmpath=SVNalarm+alarmfile
+        self.alarmpath=alarmpath
+        
+        #导入阈值信息
+        self.alarmthreshold=pd.read_table('file:///'+SvnPath+'/资料/电池技术参数/alarmthreshold.txt')
+        self.sver_threshold=self.alarmthreshold[self.alarmthreshold.软件版本号==sver]
+    
+        #生成templim
+        templim=[5,25,40]
+        templim.insert(0,int(self.sver_threshold['电池温度过低一级/℃']))
+        templim.append(int(self.sver_threshold['电池温度过高一级/℃']))
+        self.templim = templim
+        
+    def initdfmass(self):
+        '''
+        批量计算的函数\n
+        一、计算所有设备df的initialize、findcharge得到all charge\n
+        二、用GridSearch对allc找到容量计算的最优分位数\n
+        三、addq计算容量输出newcharge，stats计算其他的表\n
+        
+        parameters
+        ==========
+        input:  self.filepath 版本号文件路径\n
+                self.eq 额定容量\n
+                self.alarmpath 告警数据文件路径\n
+                self.templim [低温告警值,5,25,40,高温告警值] 温度统计范围\n
+                
+        output: self.initdf 版本号下所有设备批量计算的结果，8张表\n
+                [0] onlinedates 所有车辆上线及在线情况\n
+                [1] newcharges 所有车辆充电段信息（包含网格搜索后固定条件下的容量）\n
+                [2] discharges 所有车辆放电信息\n
+                [3] summarys 所有车辆混合信息\n
+                [4] curbydays 所有车辆curbyday汇总\n
+                [5] stops 所有车辆停车信息\n
+                [6] tempbydays 所有车辆tempbyday汇总\n
+                [7] alarm 所有车辆告警信息汇总
+        '''
+
+        #if (self.filepath is not False) & (self.eq is not False):
+        self.initdf=initdfmass(filepath=self.filepath,eq=self.eq,alarmpath=self.alarmpath,templim=self.templim)
+        
+        #用pickle包保存返回的元组成外部txt
+        rc =re.compile(r'/') #根据/拆分字符串
+        rs=rc.split(self.filepath)
+        #返回输入的路径下，名字是 版本号文件夹.txt
+        pickle.dump(self.initdf, open(rs[0]+'/'+rs[1]+'/'+rs[2]+'.txt', 'wb'))
+        
+        
+#    def alar(self):
+#        #if self.alarmpath is not False:
+#        self.alarm = alarmStats(self.alarmpath)
+
+def GridSearch(c):
+    '''
+    网格搜索函数，找到固定电压下最佳的起始电压、截止电压的分布分位数，
+    能保证符合条件充电段的数量，以及变化的电压不会太小
+    
+    parameters
+    ==========
+    input:c 充电表
+    
+    output：m/10 起始电压分位数\n
+            n/10 截止电压分位数\n
+            maxrs 起始电压\n
+            maxev 截止电压\n
+            amp 电流大小\n
+            lc 符合条件充电段占总充电段数的比例
+            
+    字段解释：
+        qamp:网格搜索方法计算出的电流,单位A float64\n
+        qpm:qamp*0.1 float64\n
+        qccendv:网格搜索方法计算出的恒流截止电压，单位mV float64\n
+        qrstartv:网格搜索方法计算出的恒流起始电压，单位mV float64
+    '''
+    amp = c.cci.median()
+    
+    #计算条数占比
+    def GSQ(c,spercent,epercent,pma=0.1):
+        #所有循环起始总电压的分位数
+        rstartv = c.rstartv.quantile(spercent)
+        #所有循环恒流末端总电压的分位数
+        ccendv = c.ccendv.quantile(epercent)
+        #电流筛选允许的上下范围
+        pm=amp*pma
+        fixc_v=c[(c.rstart<c.ccend) & (rstartv<ccendv) & (c.rstartv<rstartv) & (c.ccendv>ccendv) & (c.cci> amp-pm) & (c.cci< amp+pm)]
+        lc=len(fixc_v)/len(c)
+        return round(lc,2),rstartv,ccendv,ccendv-rstartv
+    
+    #遍历矩阵
+    M,rvM,evM,dvM=np.eye(10),np.eye(10),np.eye(10),np.eye(10)
+    
+    for i in range(0,10):
+        for j in range (0,10):
+            x=GSQ(c,spercent=i/10,epercent=j/10)
+            M[i,j]=x[0]#占比矩阵
+            rvM[i,j]=x[1]#起始电压矩阵
+            evM[i,j]=x[2]#截止电压矩阵
+            dvM[i,j]=x[3]#电压变化量矩阵
+    
+    #M[0,0]=0
+    #dvM[0,0]=0
+    #简单把两个矩阵每个对应位置值相乘，乘积代表考虑两个因素下（占比、deltaV\deltaSOC)的权衡（默认权重都为1）
+    DM=M*dvM
+    #找出最大值位置
+    DM.shape
+    raw, column = DM.shape
+    m, n = divmod(np.argmax(DM), column) 
+    
+    maxrs=rvM[m,n]
+    maxev=evM[m,n]
+    lc=M[m,n]
+    
+    #可计算容量充电段占充电段总数 比例矩阵
+    plt.figure()
+    M=pd.DataFrame(M,index=list(range(0,100,10)),columns=list(range(0,100,10)))
+    Mp=sns.heatmap(M, cmap="Greens",yticklabels=True,vmin=0, vmax=1,cbar=True,annot=True,fmt='3.2f')
+    plt.title('Effective Data Amounts Ratio Matrix',fontsize=15)
+    Mp.set_xlabel('CC_end V quantile %')
+    Mp.set_ylabel('Startv quantile %')
+    #固定起始电压至截止电压 差值矩阵
+    plt.figure()
+    dvM[0]=0
+    dvM[:,0]=0
+    dvM=pd.DataFrame(dvM,index=list(range(0,100,10)),columns=list(range(0,100,10)))
+    dvMp=sns.heatmap(dvM, cmap="Greens",yticklabels=True,cbar=True,annot=True,fmt='3.2f')
+    plt.title('Startv~Ccendv Diff-value Matrix',fontsize=15)
+    dvMp.set_xlabel('CC_end V quantile %')
+    dvMp.set_ylabel('Startv quantile %')
+    #分位数得分 结果矩阵
+    plt.figure()
+    DM=pd.DataFrame(DM,index=list(range(0,100,10)),columns=list(range(0,100,10)))
+    DMp=sns.heatmap(DM, cmap="Greens",yticklabels=True,cbar=True,annot=True,fmt='3.2f')
+    plt.title('Optimal Score Matrix',fontsize=15)
+    DMp.set_xlabel('CC_end V quantile %')
+    DMp.set_ylabel('Startv quantile %')
+    
+    return m/10, n/10,maxrs,maxev,amp,lc
+
+
+def initdfmass(filepath,eq,alarmpath,templim):
+    '''
+    批量计算的函数\n
+    一、计算所有设备df的initialize、findcharge得到all charge\n
+    二、用GridSearch对allc找到容量计算的最优分位数\n
+    三、addq计算容量输出newcharge，stats计算其他的表
+    
+    parameters
+    ==========
+    input:  filepath 版本号文件路径\n
+            eq 额定容量\n
+            alarmpath 告警数据文件路径\n
+            templim=[低温告警值,5,25,40,高温告警值] 温度统计范围
+            
+    output:版本号下所有设备批量计算的结果，8张表\n
+            onlinedates 所有车辆上线及在线情况\n
+            newcharges 所有车辆充电段信息（包含网格搜索后固定条件下的容量）\n
+            discharges 所有车辆放电信息\n
+            summarys 所有车辆混合信息\n
+            curbydays 所有车辆curbyday汇总\n
+            stops 所有车辆停车信息\n
+            tempbydays 所有车辆tempbyday汇总\n
+            alarm 所有车辆告警信息汇总
+    '''
+    dir = os.fsencode(filepath)
+    charges=[]
+    discharges = []
+    #计算出charge
+    for file in os.listdir(dir):
+        filename = os.fsdecode(file)
+        imei = int(filename[0:15])
+        path = filepath + '/%s.csv'%imei
+        v = vehicle(path,imei,ratedc=eq)
+        v.initialize()
+        v.findcharge()
+        if (v.df is not None) & (v.chargeinfo is not None):
+            c = v.chargeinfo
+            c.loc[:,'imei'] = imei
+            charges.append(c)   #每辆车的循环
+
+            discharge0 = v.discharge   #放电表，包含I_discharge_ave 某次放电平均电流
+            discharges.append(discharge0)
+            
+            print('one %s success'%imei)
+        else:
+            print('one %s fail'%imei)
+    
+    allc = pd.concat(charges)
+    discharges = pd.concat(discharges)
+    #网格搜索
+    Qparameters=GridSearch(allc)
+    #网格搜索的选取依据
+    
+    #
+    onlinedates=[]
+    charges = []
+    summarys = []
+    curbydays = []
+    stops = []
+    tempbydays = []
+
+    for imei in allc.imei.unique():
+        path = filepath + '/%s.csv'%int(imei)
+        
+        v = vehicle(path,imei,ratedc=eq)
+        v.initialize()
+        v.chargeinfo=allc[allc.imei==imei]
+        v.discharge=discharges[discharges.imei==imei]
+        
+        #if (v.df is not None) & (v.chargeinfo is not None):
+        v.addq(sv=Qparameters[2],ev=Qparameters[3],a=Qparameters[4])#默认传入self.df, self.chargeinfo
+        v.stats(templim=templim)
+        
+        c=v.chargeinfo
+        charges.append(c)
+    
+        curbyday0 = v.curbyday      #chargemax dischargemin chargemean dischargemean
+        curbyday0.loc[:,'imei'] = imei
+        curbydays.append(curbyday0)
+
+        stop0 = v.stop     #静止表，包含stop_SOC、stop_T、stop_t
+        stop0.loc[:,'imei'] = imei
+        stops.append(stop0)       
+    
+        Temp0 = v.Temp             #温度表，包含T_max、T_min、delta_T
+        Temp0.loc[:,'imei'] = imei
+        tempbydays.append(Temp0)
+
+        onlinedate0=v.onlinedate
+        onlinedate0.loc[:,'imei'] = imei
+        onlinedates.append(onlinedate0)
+                    
+        summary0=v.summary         #一设备一行的参数表
+        summary0.loc[:,'imei'] = imei
+        summarys.append(summary0)
+        print('two %s '%int(imei))
+
+    onlinedates = pd.concat(onlinedates)
+    newcharges = pd.concat(charges)    
+    summarys = pd.concat(summarys)
+    curbydays = pd.concat(curbydays)
+    stops = pd.concat(stops)
+    tempbydays = pd.concat(tempbydays)
+    alarm = alarmStats(alarmpath)
+    
+    print("选取结果：起始分位数%s\n截止分位数%s\n起始电压%s\n截止电压%s\n电流%s"%(Qparameters[0],Qparameters[1],Qparameters[2],Qparameters[3],Qparameters[4]))    
+    return onlinedates,newcharges,discharges,summarys,curbydays,stops,tempbydays,alarm
