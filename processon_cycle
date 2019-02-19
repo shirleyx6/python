@@ -1,0 +1,529 @@
+# -*- coding: utf-8 -*-
+"""
+import pandas as pd
+import numpy as np
+
+def findcharge(df,minlength):
+
+    '''
+    函数 充电循环识别: 
+        chargeinfo(df,charge,minlength=60)
+        
+        input: 
+            df 经过初始化的数据dataframe
+            
+        output: 
+            a,discharge
+       
+    a字段含义：
+            start0,end0 :记录充电循环gt(-5)起止索引\n
+            sum_ : 记录充电循环gt(0)的充电时刻数目\n
+            start,end ：记录充电循环gt(0)且排除sum_<=0后充电段修正起止索引\n
+            duration ： 记录充电循环充电时长\n
+            len_ : 记录充电段长度\n
+            start 充电起始点对应df中的下标 int64\n
+        		end 充电结束点对应df中的下标 int64\n
+            duration 充电持续时间 单位秒(s) float64\n
+
+    '''
+    #PLACEHOLDER
+    cur = df.ncurrent.gt(-5)
+    data = df.ncurrent.gt(0)
+    cs = cur.groupby((~cur).cumsum())
+    cs2 = data.groupby((~cur).cumsum())
+    a = pd.DataFrame({'one':cs.sum(),'two':cs.sum().cumsum(),'sum_':cs2.sum()})
+    
+    a['two'] = a.two.shift(1)
+    a.iloc[0,1] = 0
+    #电流大于-5A的充电段始末数据
+    a['start0'] = a.index+a.two
+    a['end0'] = a.start0+a.one
+    a = a.loc[(a.one>=60) & (a.sum_ > 0),['start0','end0','sum_']]
+    a.reset_index(drop=True,inplace=True)
+
+#######################################################################放电    
+    cur1 = df.ncurrent.lt(-5)
+    data1 = df.ncurrent.lt(0)
+    cs1 = cur1.groupby((~cur1).cumsum())
+    cs21 = data1.groupby((cur1).cumsum())
+    b = pd.DataFrame({'one':cs1.sum(),'two':cs1.sum().cumsum(),'sum_':cs21.sum()})
+    b['two'] = b.two.shift(1)
+#    b.iloc[0,1] = 0
+    #电流小于-5A的充电段始末数据
+    b['start1'] = b.index+b.two
+    b['end1'] = b.start1+b.one
+    b = b.loc[(b.one>=60) & (b.sum_ < 900),['start1','end1','sum_']]
+    b=b.dropna()
+    b.reset_index(drop=True,inplace=True)
+
+    discharge=pd.DataFrame()
+        
+    '''
+    字段含义：
+        idischargeave：某次放电平均电流，单位A float64
+    '''
+    try:
+        discharge.loc[:,'start1']=b.start1
+        discharge.loc[:,'end1']=b.end1
+        discharge.loc[:,'idischargeave']=b.apply(lambda x: df.loc[x.loc['start1']:x.loc['end1'],'ncurrent'].mean(),axis=1)
+        discharge.loc[:,'startv']=b.apply(lambda x: df.loc[x.loc['start1'],'sumvolt'],axis=1)
+        discharge.loc[:,'endv']=b.apply(lambda x: df.loc[x.loc['end1'],'sumvolt'],axis=1)
+        discharge.loc[:,'startt']=b.apply(lambda x: df.loc[x.loc['start1'],'maxtemp1'],axis=1)
+        discharge.loc[:,'endt']=b.apply(lambda x: df.loc[x.loc['end1'],'maxtemp1'],axis=1)
+        discharge.loc[:,'Ah'] = b.apply(lambda x:df.loc[x.loc['start1']:x.loc['end1'],'deltac'].sum(),axis=1)
+        discharge.loc[:,'date'] = b.apply(lambda x: df.loc[x.loc['start1']:x.loc['end1'],'time_in'].min(),axis=1) 
+        discharge.reset_index(drop=True,inplace=True)
+        discharge.loc[:,'imei'] = df.imei
+    except:
+        discharge=pd.DataFrame(columns=['start1', 'end1', 'idischargeave', 'startv', 'endv', 'startt', 'endt', 'Ah','date','imei'])
+        
+    
+    if len(a)>0:    
+        a.loc[:,'start'] = a.apply(lambda x:df.loc[x.iloc[0]:x.iloc[1],'ncurrent'].gt(0).idxmax(),axis=1)
+        a.loc[:,'end'] = a.apply(lambda x:df.loc[x.iloc[0]:x.iloc[1],'ncurrent'].gt(0).iloc[::-1].idxmax(),axis=1)
+       
+        #充电时长添加(s)
+        s = a.iloc[:,3]
+        e = a.iloc[:,4]
+        stime = df.loc[s,'time_in']
+        stime.index = a.index
+        etime = df.loc[e,'time_in']
+        etime.index = a.index
+        a.loc[:,'duration'] = ( etime-stime ) / pd.Timedelta('00:00:01')        
+                
+        a.loc[:,'len_'] = a.end-a.start
+        #充电段筛选条件：1）持续时间筛选；2）排除夹杂过多小电流放电的充电段：3)保证可以去到rstart(长度限制大于60)
+        a=a[(a.duration>minlength) & (a.sum_ > 0.5* a.len_) & (a.len_ > 60)]
+        a.reset_index(drop=True,inplace=True)
+        a = findccend(df,a)
+    return a,discharge
+
+def findccend(df,charge):
+    tuplepos=[]
+    for i in range(len(charge)):
+        s=tuple(charge.iloc[i])
+        tuplepos.append(s)
+    
+    def cc(data):
+        #电流大小
+        c = data.ncurrent
+        #电流变化是否大于30,记为'bang'
+        bang = c.diff().abs().gt(30)
+        #附近5个点的bang的数量
+        n=bang.rolling(5).sum()
+        
+        #恒流末端'指数',正常应在恒流末端达到最大值
+        findccend = c/(1+n)
+        #找恒流末端
+        maxcc = findccend.max()
+        #恒流充电电流可能不稳定,只要没有突变,恒流指数大于最大点*0.97都可以,选取符合条件的最后一个点
+        lastpoint = maxcc-abs(maxcc) * 0.03
+        ccend = findccend[ findccend >= lastpoint].index[-1]
+        return ccend
+    
+    ccend = list(map(cc, [df[int(pos[3]):int(pos[4])] for pos in tuplepos]))
+    charge.loc[:,'ccend'] = ccend
+    return charge
+
+def chargeinfo(df,charge,ratedc,imei):
+    '''
+    函数 充电循环相关信息计算: 
+        chargeinfo(df,charge,minlength=60)
+        
+        input: 
+            df 经过初始化的数据dataframe\n
+            charge 通过findcharge计算或已保存的充电循环起止位置dataframe\n
+            minlength 保留的最短循环时间 可选 默认60s
+            
+        output: 
+            包含完整循环信息的dataframe 
+            
+    charge字段含义：
+            startsoc 充电起始soc 单位：千分之(‰) int32\n
+            starttime 充电起始时间 datetime64[ns]\n
+            startv 充电起始总电压 单位：伏特(V) float64\n
+            days 充电时离车辆首次上线的天数 单位：天 int32\n
+            startmax 充电起始最高单体电压 单位：毫伏(mV) int32\n
+            startt 充电起始温度 单位：摄氏度(℃) float64\n
+            date 充电日期 pandas日期对象\n
+            rstart 避开内阻影响电压瞬涨的充电起点对应df中的下标 int64\n
+            rstartv 避开内阻影响电压瞬涨的充电起点电压 单位：伏特(V) float64\n
+            rstartmax 修正的充电起始最高单体电压 单位：毫伏(mV) int32\n
+            ccend 恒流充电结束点对应df中的下标 int64\n
+            ccenddv 恒流阶段结束压差 单位：毫伏(mV) int32\n
+            ccendv 恒流阶段结束总电压 单位：伏特(V) float64\n
+            cci 恒流阶段充电电流 单位：安培(A) float64\n
+            ccendtime 恒流充电结束时间 datetime64[ns]\n
+            ccendmax 恒流结束最高单体电压 单位：毫伏(mV) int32\n
+        		ccendmin 恒流结束最低单体电压 单位：毫伏(mV) int32\n
+            ccendt  恒流结束温度 单位：摄氏度(℃) float64\n
+            fs 充电电流是否大于额定电流 int32\n
+            fsrate 充电电流大于额定电流的充电段比例 float64\n
+            endsoc 结束soc 单位：千分之(‰) int32\n
+            endv 结束总电压 单位：伏特(V) float64\n
+            endmax 结束最高单体电压 单位：毫伏(mV) int32\n
+            endmin 结束最低单体电压 单位：毫伏(mV) int32\n
+            enddv 充电结束压差 单位：毫伏(mV) int32\n
+            effc 充电开始时等效循环次数 float64\n
+            endt 结束温度 单位：摄氏度(℃) float64\n
+            endtime 充电结束时间 datetime64[ns]\n
+            r 电池包内阻 单位 欧姆（Ω/Ohm） float64\n
+            r_cellmax 最大电压单体内阻 单位 毫欧 mΩ float64\n
+            r_cellmin 最小电压单体内阻 单位 毫欧 mΩ float64\n
+            deltas 充电始末soc变化 单位：百分之(％) float64\n
+            lithiumplatingevent 可能发生析锂情况的次数 int32\n
+            Ah 充电容量 单位:安时(Ah) float64\n
+            ccAh 恒流充电容量 单位:安时(Ah) float64\n
+            ichargeave 平均充电电流 单位：安培(A) float64\n
+            imei 车辆编码 15位 int64\n
+            dT 起始至恒流充电过程温差 单位：摄氏度(℃) float64\n
+            ccduration 恒流充电过程时长 单位：秒(s) float64\n
+            dTtrate 温差随时间的变化率 单位：摄氏度每秒(℃/s) float64\n
+            dTVrate 温差随电压的变化率 单位：摄氏度每伏特(℃/V) float64\n
+    '''    
+    #充电段起始、恒流充电末端、终止的df索引
+    s = charge.iloc[:,3]
+    e = charge.iloc[:,4]
+    cce = charge.iloc[:,7]
+    #df表符合条件的行，索引修正为charge表的索引
+    charge_s, charge_s5, charge_cce, charge_e_1, charge_e = df.loc[s],df.loc[s+5],df.loc[cce],df.loc[e-1],df.loc[e]
+    charge_s.index = charge.index
+    charge_s5.index = charge.index
+    charge_cce.index = charge.index
+    charge_e_1.index = charge.index
+    charge_e.index = charge.index
+    #s
+    charge.loc[:,'startsoc'] = charge_s.soc
+    charge['starttime'] = charge_s.time_in  #新增起始时间
+    charge.loc[:,'startv'] = charge_s.sumvolt
+    charge.loc[:,'days'] = charge_s.since
+    charge.loc[:,'startmax'] = charge_s.maxcell1
+    charge.loc[:,'startt'] = charge_s.maxtemp1
+    charge.loc[:,'date'] = charge_s.time_in.dt.date    
+    #s+5
+    #避开内阻影响电压瞬涨的充电起点
+    charge.loc[:,'rstart'] = s+5
+    charge.loc[:,'rstartv'] = charge_s5.sumvolt
+    charge.loc[:,'rstartmax'] = charge_s5.maxcell1
+     #cce
+    charge.loc[:,'ccenddv'] = charge_cce.dv
+    charge.loc[:,'ccendv'] = charge_cce.sumvolt
+    charge.loc[:,'cci'] = charge_cce.ncurrent
+    charge['ccendtime'] = charge_cce.time_in  #新增ccend时间
+    charge.loc[:,'fs'] = (charge.loc[:,'cci']>=ratedc).astype(int)
+    charge.loc[:,'fsrate']=charge.fs.cumsum()/(charge.index+1)   
+
+    
+    charge.loc[:,'ccendmax'] = charge_cce.maxcell1
+    charge.loc[:,'ccendmin']  = charge_cce.mincell1
+    charge.loc[:,'ccendt'] = charge_cce.maxtemp1
+    #e-1
+    charge.loc[:,'endsoc'] = charge_e_1.soc   
+    #e
+    charge.loc[:,'endv'] = charge_e.sumvolt
+    charge.loc[:,'endmax']  = charge_e.maxcell1
+    charge.loc[:,'endmin']  = charge_e.mincell1
+    charge.loc[:,'enddv'] = charge_e.dv
+    charge.loc[:,'effc'] = charge_e.effc
+    charge.loc[:,'endt'] = charge_e.maxtemp1
+    charge['endtime'] = charge_e.time_in  #新增end时间
+    
+    #直流内阻 s-1,e+5
+    s_1 = s-1
+    s_1[s_1.lt(0)] = 0
+    v0 = df.loc[s_1,['sumvolt','maxcell1','mincell1']]
+    v10 = df.loc[s+5,['sumvolt','maxcell1','mincell1']]
+    i0 = df.loc[s_1,'ncurrent']
+    i10 = df.loc[s+5,'ncurrent']
+    v0.index = charge.index
+    v10.index = charge.index
+    i0.index = charge.index
+    i10.index = charge.index    
+    charge.loc[:,'r'] = (v10.sumvolt-v0.sumvolt) / (i10-i0)
+    charge.loc[:,'r_cellmax'] = (v10.maxcell1-v0.maxcell1) / (i10-i0)  #最大电压单体内阻
+    charge.loc[:,'r_cellmin'] = (v10.mincell1-v0.mincell1) / (i10-i0)  #最小电压单体内阻
+ 
+#    charge.loc[:,'dT'] = charge_cce.maxtemp1 - charge_s5.maxtemp1
+    charge.loc[:,'deltas'] = (charge.endsoc - charge.startsoc)/1000
+    charge.loc[:,'lithiumplatingevent']=((charge.loc[:,'cci']>ratedc)&(charge.loc[:,'startsoc']<700)&(charge.loc[:,'endsoc']>=700)&(charge.loc[:,'startt']<15)).astype(int)
+    #充电容量、恒流容量计算
+    charge.loc[:,'Ah'] = charge.apply(lambda x:df.loc[x.iloc[3]:x.iloc[4],'deltac'].sum(),axis=1)
+    charge.loc[:,'ccAh'] = charge.apply(lambda x:df.loc[x.iloc[3]:x.iloc[7],'deltac'].sum(),axis=1)
+    charge.loc[:,'ichargeave'] = charge.apply(lambda x:df.loc[x.iloc[3]:x.iloc[4],'ncurrent'].mean(),axis=1)
+    charge.loc[:,'imei'] =  imei
+    
+    #dT为起始至恒流充电过程温差，ccduration为恒流充电过程时长，dTtrate为温差随时间的变化率（单位：℃/s），dTVrate为温差随电压的变化率（单位：℃/V）
+    charge['dT'] = (charge.ccendt-charge.startt)
+    charge['ccduration'] = (charge.ccendtime-charge.starttime) / pd.Timedelta('00:00:01')
+    charge['dTtrate'] = charge['dT'] / (charge.ccduration+0.01) #
+    charge['dTVrate'] = charge['dT'] / (charge.ccendv-charge.startv+0.01) #
+
+    #过滤
+    charge=charge[charge.startsoc<=charge.endsoc]
+    charge.reset_index(drop=True,inplace=True)
+
+    return charge
+
+def findq(df,c,spercent=0.8,epercent=0.2,sv = None,sm=None,ssoc = None,ev=None,em=None,esoc=None,a = None,pma=0.1):
+    '''
+    函数 充电容量及温度变化率计算: 
+        findq(df,c)
+        
+        input: 
+            df 经过初始化的数据dataframe\n
+            c 通过chargeinfo计算或已保存的充电循环信息dataframe\n
+            spercent 起始电压分位数百分比 可选 默认0.8\n
+            epercent 结束电压分位数百分比 可选 默认0.2\n
+            sv 起始电压 可选 默认None\n
+            sm 起始最大单体电压 可选 默认None\n
+            ev 结束电压 可选 默认None\n
+            em 结束最大单体电压 可选 默认None\n
+            a 电流 可选 默认None\n
+            pma 电流正负范围百分比 可选 默认0.1\n
+            startsoc 固定SOC充电容量计算的起始SOC\n
+            endsoc 固定SOC充电容量计算的截止SOC
+            
+        output: 
+            包含容量信息的dataframe和容量计算选取的电压电流组成的tuple
+        
+        c字段含义：
+            fixedvq 固定电压、电流条件下的充电容量 单位:安时(Ah) float64\n
+            fixedsocq 固定SOC条件下的充电容量 单位:安时(Ah) float64\n
+
+    '''
+    
+    
+    c=pd.DataFrame(c,columns=['start0', 'end0', 'sum_', 'start', 'end', 'duration', 'len_', 'ccend',
+       'startsoc', 'starttime', 'startv', 'days', 'startmax', 'startt', 'date',
+       'rstart', 'rstartv', 'rstartmax', 'ccenddv', 'ccendv', 'cci',
+       'ccendtime', 'fs', 'fsrate', 'ccendmax', 'ccendmin', 'ccendt', 'endsoc',
+       'endv', 'endmax', 'endmin', 'enddv', 'effc', 'endt','endtime', 'r', 'r_cellmax','r_cellmin','deltas',
+       'lithiumplatingevent', 'Ah', 'ccAh', 'ichargeave', 'imei', 'dT',
+       'ccduration', 'dTtrate', 'dTVrate','fixedvq','fixedsocq'])
+    
+    #所有循环起始总电压的分位数
+    if sv is None:
+        rstartv = c.rstartv.quantile(spercent)
+    #或输入值
+    else:
+        rstartv = sv
+        
+    #所有循环起始最大单体电压的分位数
+#    if sm is None:
+#        rstartm = c.rstartmax.quantile(spercent)
+#    else:
+#        rstartm = sm
+        
+    if ssoc is None:
+        startsoc = c.startsoc.quantile(spercent)
+    #或输入值
+    else:
+        startsoc = ssoc
+   
+    #所有循环恒流末端总电压的分位数
+    if ev is None:
+        ccendv = c.ccendv.quantile(epercent)
+    else:
+        ccendv = ev
+        
+    #所有循环恒流末端最大单体电压的分位数
+#    if em is None:
+#        ccendm = c.ccendmax.quantile(epercent)
+#    else:
+#        ccendm = em
+    
+    if esoc is None:
+        endsoc = 980
+    else:
+        endsoc = esoc
+
+    #充电电流中位数或输入值
+    if a is None:
+        amp = c.cci.median()
+    else:
+        amp = a
+    
+    #电流筛选允许的上下范围
+    pm=amp*pma
+    
+    
+    #起止电压'包括'所选'范围',且电流符合条件
+    fixc_v=c[(c.rstart<c.ccend) & (rstartv<ccendv) & (c.rstartv<rstartv) & (c.ccendv>ccendv) & (c.cci> amp-pm) & (c.cci< amp+pm)]
+    '''
+    r起始=start+后移5个点
+    1、r起始下标小于恒流截止点下标，筛选情况：恒流充电段过短start+5>ccend的异常
+    2、恒流截止固定电压大于r起始固定电压
+    3、筛选出数据中小于固定起始电压、大于固定截止电压的条目
+    4、电流固定
+    '''
+    #选择经过'范围'的区间
+    for i in fixc_v.index:
+        rs = c.loc[i,'rstart']
+        cce = c.loc[i,'ccend']
+        data = df.loc[rs:cce]
+        qs_v = data[data.sumvolt>=rstartv].index[0]
+#        try:
+        qe_v = data[data.sumvolt>ccendv].index[0]
+#        except:
+#            qe_v = data[data.sumvolt<=ccendv].index[-1]
+        tdata = data.loc[qs_v:qe_v]
+        c.loc[i,'fixedvq'] = tdata.deltac.sum()
+#        #fixedvdT为固定电压电流计算容量段所对应的温差，fixedvdTtrate为固定电压电流计算容量温差随时间的变化率（单位：℃/hour）
+#        b = tdata.maxtemp1.ptp()
+#        c.loc[i,'fixedvdT'] = b
+#        #if a.ndt.sum() != 0:
+#        c.loc[i,'fixedvdTtrate'] = b / (tdata.ndt.sum()+0.01)#
+#    else:
+#        c.loc[:,'fixedvq'] = None
+#        c.loc[:,'fixedvdT'] = None
+#        c.loc[:,'fixedvdTtrate'] = None
+    
+    fixc_s=c[(c.startsoc<startsoc) & (c.endsoc>=endsoc)]
+    #选择经过'范围'的区间
+    for i in fixc_s.index:
+        rs = c.loc[i,'rstart']
+        e = c.loc[i,'end']
+        data = df.loc[rs:e]
+        if ((data.soc>=startsoc).sum() !=0 ) and ((data.soc>=endsoc).sum() !=0):
+            qs_s = data[data.soc>=startsoc].index[0]
+            qe_s = data[data.soc>=endsoc].index[0]
+            tdata = data.loc[qs_s:qe_s]
+            c.loc[i,'fixedsocq'] = tdata.deltac.sum()
+#    else:
+#        c.loc[i,'fixedsocq'] = None
+    #结果输出
+    #   添加容量的循环dataframe,起始电压,结束电压,其实最大单体,结束最大单体,电流,电流正负范围
+    
+    return c,rstartv,ccendv,amp,pm,startsoc,endsoc
+
+def diswrap(table):
+    '''
+    函数 生成用于放电OCV-SOC计算的函数dischargesoc(): 
+        diswrap(table)
+        
+        input: 
+            table 对应版本的OCV-SOC表
+            
+        output: 
+            dischargesoc()函数，供容量计算中的apply使用
+    '''
+    def dischargesoc(ocv):
+        table['dsoc'] = table.soc.diff(-1).abs()
+        if ocv<table.loc[0,'docv']:
+            return 0
+        else:
+            if ocv>table.loc[len(table)-1,'docv']:
+                return 1000
+            else:
+                ceilingind = table[table.docv>=ocv].iloc[0].name
+                return table.loc[ceilingind-1,'soc'] + table.loc[ceilingind-1,'dsoc']* (ocv - table.loc[ceilingind-1,'docv'])/(table.loc[ceilingind,'docv'] - table.loc[ceilingind-1,'docv'])
+    return dischargesoc
+
+def chrwrap(table):
+    '''
+    函数 生成用于充电OCV-SOC计算的函数chargesoc(): 
+        chrwrap(table)
+        
+        input: 
+            table 对应版本的OCV-SOC表
+            
+        output: 
+            chargesoc()函数，供容量计算中的apply使用
+    '''
+    def chargesoc(ocv):
+        table['dsoc'] = table.soc.diff(-1).abs()
+        if ocv<table.loc[0,'cocv']:
+            return 0
+        else:
+            if ocv>table.loc[len(table)-1,'cocv']:
+                return 1000
+            else:
+
+                ceilingind = table[table.cocv>=ocv].iloc[0].name
+
+                return table.loc[ceilingind-1,'soc'] + table.loc[ceilingind-1,'dsoc']* (ocv - table.loc[ceilingind-1,'cocv'])/(table.loc[ceilingind,'cocv'] - table.loc[ceilingind-1,'cocv'])
+
+    return chargesoc
+
+
+def capacity(df,table,numcells,minrest = '00:15:00',cell=False):  
+    '''
+    函数 计算基于静置时间和ocv-soc对应关系的容量: 
+        capacity(df,table,numcells,minrest = '00:15:00')
+        
+        input: 
+            df 经过初始化的数据dataframe
+            table 对应版本的OCV-SOC表。numpy array (2*k)，0行是ocv，1行是对应soc
+            numcells 单体数量
+            minrest 最小静置时间，可选，默认15分钟
+            cell 是否计算单体容量，可选，默认False
+            
+        output: 
+            dataframe表，包含所有相邻静置点之间计算的容量和相关信息用于后续过滤
+    
+    Q表字段含义：
+            start 运行段起始对应df中的下标 int64\n
+            end 运行段结束对应df中的下标 int64\n
+            startocv 运行段起始开路电压 单位：伏特(V) float64\n
+            starti 运行段起始电流 单位：安培(A) float64\n
+            starttime 运行段起始时间 datetime64[ns]\n
+            enddt 运行段结束后静置时间 timedelta64[ns]\n
+            effc 等效循环次数 float64\n
+            days 距离车辆上线第一天经过的时间 单位：天 int32\n
+            s_SOC_BMS 运行段初始BMS上报SOC值 单位：千分之(‰) int32\n
+            temp 运行段初始平均温度
+            endocv 运行段结束开路电压 单位：伏特(V) float64\n
+            endi 运行段结束电流 单位：安培(A) float64\n
+            endtime 运行段结束时间 datetime64[ns]\n
+            e_SOC_BMS 运行段结束BMS上报SOC值 单位：千分之(‰) int32\n
+            beforeocv 运行段前一次开路电压 单位：伏特(V) float64\n
+            startsoc 运行段起始soc 单位：千分之(‰) float64\n
+            endsoc 运行段结束soc 单位：千分之(‰) float64\n
+            deltasoc 运行段SOC变化值 单位：百分之(％)  float64\n
+            duration 运行时长 timedelta64[ns] \n
+            qsum 运行段累积容量 单位:安时(Ah) float64\n
+            Q 电池包容量 单位:安时(Ah) float64\n
+            Qi 第i个单体电池容量 单位:安时(Ah) float64\n
+    '''
+    def convert(ocvs):
+        return pd.DataFrame(np.interp(ocvs,table[0],table[1]))
+    
+    if cell:
+        n = numcells
+    else:
+        n = 0
+    
+    def cell_names(name):
+        return [name+str(i) for i in range(n)]
+    
+    cell_volt_, startocv_, endocv_, startsoc_, endsoc_, deltasoc_, Q_  = [cell_names(x) for x in('cell_volt','startocv', 'endocv', 'startsoc', 'endsoc', 'deltasoc','Q')]
+    df['abs_cur'] = df.ncurrent.abs()
+    df['mean_cur'] = df.rolling(pd.Timedelta(minrest),on='time_in',closed='both').abs_cur.mean()
+    _Q = df.loc[df.mean_cur<=0.1,['time_in','ncurrent']]
+    _Q['dt'] = -_Q.time_in.diff(-1)
+    Q = pd.DataFrame(_Q[_Q.dt>'00:15:00'].index,columns=['start'])
+    Q_l = []
+    for i in range(1,5):
+        Q_wip = pd.DataFrame(Q)
+        Q_wip['end'] = Q_wip.start.shift(-i)
+        Q_wip = Q_wip.drop(Q.index[len(Q)-i:])
+        Q_l.append(Q_wip)
+    Q = pd.concat(Q_l).reset_index(drop=True)
+    
+    Q[['startocv','starti','starttime','enddt','effc','days','s_SOC_BMS','temp1','temp2']+startocv_] = (df.loc[Q.start,['sumvolt','ncurrent','time_in','dt','effc','since','soc','maxtemp1','mintemp1']+cell_volt_]).reset_index(drop=True)
+    Q['temp'] = (Q.temp1 + Q.temp2)/2
+    Q[['endocv','endi','endtime','enddt','e_SOC_BMS']+endocv_] = (df.loc[Q.end,['sumvolt','ncurrent','time_in','dt','soc']+cell_volt_]).reset_index(drop=True)
+    
+    ocvs = (Q.loc[:,['startocv','endocv']]/numcells).values
+    Q[['startsoc','endsoc']] = convert(ocvs)
+    cell_ocvs = Q.loc[:,startocv_+endocv_].values/1000
+    Q[startsoc_+endsoc_] = convert(cell_ocvs)
+    
+    Q['deltasoc'] = Q['endsoc'] - Q['startsoc']    
+    Q[deltasoc_] = pd.DataFrame((Q[endsoc_].values - Q[startsoc_].values))
+    
+    Q['duration'] = Q['endtime'] - Q['starttime']-Q['enddt']
+    Q['qsum'] = Q.apply(lambda x:df.loc[x.start:x.end,'deltac'].sum(),axis=1)
+    Q['Q'] = Q['qsum']/Q['deltasoc']
+    Q[Q_] = (1/Q[deltasoc_]).mul(Q['qsum'],axis=0)
+    return Q
