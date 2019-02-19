@@ -1,0 +1,281 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Aug  2 13:19:05 2017
+
+@author: ganshi
+"""
+
+import pandas as pd
+from da.preprocess.cycles import *
+from da.preprocess.stats import *
+
+
+def initialize(path,ratedc=90,fast = False):
+    '''
+    函数 数据文件初始化: 
+        initialize(path,ratedc=90)
+        
+        input: 
+            path 数据文件目录\n
+            ratedc 额定单体容量 可选 默认90\n
+            fast 是否略过日期相关处理 可选 默认False
+        output: 
+            完整数据的pandas dataframe
+    
+    df字段解释
+        imei 车辆编码 15位 int64\n
+        time_in 该条数据记录日期和时间 datetime64[ns] \n
+        time_data 该条数据记录日期2和时间2 datetime64[ns]\n
+        nserial 连续记录的顺序编号值 int32\n
+        sumvolt 电池包总电压 单位：伏特(V) float64\n
+        ncurrent 电池包电流 单位：安培(A) float64\n
+        soc 电池包soc状态 0-1000 单位：千分之(‰)  int32\n
+        maxcell1 最大单体电压 单位：毫伏(mV) int32\n
+        mincell1 最小单体电压 单位：毫伏(mV) int32\n
+        maxtemp1 最高采集温度 单位：摄氏度(℃) float64\n
+        mintemp1 最低采集温度 单位：摄氏度(℃) float64\n
+        dt 该条数据和前一条的时间间隔 单位：秒(s) timedelta64[ns]\n
+        dv 单体压差（最大单体-最低单体） 单位：毫伏(mV) int32\n
+        date 日期（年月日） pandas日期对象\n
+        since 该条数据距离车辆上线第一天经过的时间 单位：天 int32	\n
+        ndt 同dt，将时间太大的修改为5秒，用于计算电流积分 单位:小时(h) float64\n			
+        deltac 该点的电池电量变化 单位:安时(Ah) float64\n
+        deltaWh 该点的电池能量变化 单位:安时(Ah) float64\n
+        effc 该条数据记录时电池经历的等效循环次数 单位：次 float64 \n
+
+    '''
+    
+    #读入车辆数据
+    try:
+        df = pd.read_csv(filepath_or_buffer = path)
+    #应对路径中包含中文,pandas可能出现的读取不了文件的bug
+    except:
+        df = pd.read_csv(open(path))
+    
+    #只处理数据条目1万以上的    
+    if len(df)<=10000:
+        return None
+    
+    df = df[df.imei.astype('str')!='imei']
+    #去除时间字段中年份异常(如5000会导致无法转换成datetime)
+    df = df[df.time_in.notnull()]
+    df = df[df.time_in.str[:4].astype('int').between(2010,2050)]
+    
+    #转换时间格式,按时间先后排列,只保留2010年后的数据
+    df.loc[:,'time_in'] = df.time_in.astype('datetime64[ns]')
+    df = df[df.time_in>pd.Timestamp('2010-05-01')]
+    df.loc[:,'time_data'] = df.time_data.astype('datetime64[ns]')
+#    df.loc[:,'nserial'] = df.nserial.astype('int')
+#    
+    #去除重复值
+    df = df.drop_duplicates()
+    try:
+        #数据条目时间有重复现象，time_in和time_data都有发生，先按照time_in排序
+        #再按time_data，再按nserial(目前数据暂不支持，下一批数据实施)
+        df = df.sort_values(['time_in','time_data','nserial'])
+    except:
+        #兼容只有time_in的数据
+        df = df.sort_values(by = 'time_in')
+    try:
+        df = df.drop('Unnamed: 0',1)
+    except:
+        pass
+    
+   
+    #电压,电流,温度单位转换为V,A,C
+    df.loc[:,'sumvolt'] = df.sumvolt.astype('int')/10
+    df.loc[:,'ncurrent'] = df.ncurrent.astype('int')/10
+    df.loc[:,'maxtemp1'] = df.maxtemp1.astype('int')/10
+    df.loc[:,'mintemp1'] = df.mintemp1.astype('int')/10
+
+          
+    df.loc[:,'maxcell1'] = df.maxcell1.astype('int')
+    df.loc[:,'mincell1'] = df.mincell1.astype('int')
+    df.loc[:,'soc'] = df.soc.astype('int')
+    
+    
+    #加入时间差,压差字段
+    df.loc[:,'dt'] = df.time_in.diff()
+    df.loc[:,'dv'] = df.maxcell1-df.mincell1
+    
+    #对剩余数据重新添加索引
+    df.reset_index(drop=True, inplace = True)
+
+    #数据'中断'的时间差判断阈值(0.999分位数)
+    threshold = df.dt.quantile(0.999,interpolation='nearest')
+    
+    #加入累计天数和日期字段
+    df.loc[:,'date'] = df.time_in.dt.date
+    first = df.loc[0,'date']
+    df.loc[:,'since'] = ((df.date-first)/pd.Timedelta('1 days')).astype('int')
+
+    #单体容量的变化(每一点)Ah
+    df.loc[:,'deltac'] = df['ncurrent'] * 5/3600
+
+    #累计等效循环次数
+    df.loc[:,'effc'] = (df.deltac*df.ncurrent.gt(0)).cumsum() // ratedc
+    
+    if ~fast:
+    #加入用于计算容量的时间差字段
+        df.loc[:,'ndt'] = df.time_in.diff()
+        df.loc[df.ndt>threshold,'ndt'] = pd.Timedelta('00:00:05')
+        df.loc[:,'ndt'] = df.ndt / pd.Timedelta('01:00:00')
+        df.loc[:,'dW']=df.sumvolt*df.ncurrent*df.ndt
+        df.loc[:,'deltaWh']=df.sumvolt * df.ncurrent * 5/3600
+
+    return df
+
+
+
+class vehicle():
+    '''类
+    VEHICLE：存储所有车辆相关的数据和统计	
+    
+    '''
+   
+    def __init__(self, path, imei, run=False, ratedc=90, minlength=60):
+        '''
+        创建 vehicle(path, imei, run=False, ratedc=90, minlength=60 )
+        
+        input:
+            path: csv文件路径字符串\n
+            imei：车辆imei识别号码 整数\n
+            run：是否创建时自动执行run（）方法，默认False,布尔\n
+            ratedc: 电池额定容量，用于计算等效循环次数，单位安时，默认90\n
+            minlength: 充电循环最小持续时间，单位为秒，默认60\n
+        '''
+        self.imei = imei
+        self.path = path
+        self.ratedc = ratedc
+        self.minlength = minlength
+        if run:
+            self.run()
+    
+    def initialize(self):
+        '''方法
+            initialize(): 根据path属性的路径读取csv文件并初始化，将结果以dataframe形式保存在df属性中
+        '''
+        self.df = initialize (self.path,ratedc = self.ratedc)
+    
+    def findcharge(self):
+        '''方法
+            findcharge(): 根据df属性的经过初始化的dataframe进行计算，得出充电循环和充电信息，将结果以df形式保存在chargepos和chargeinfo属性中
+        '''
+        if self.df is None:
+            self.chargepos=None
+            self.chargeinfo=None
+            self.discharge=None
+        else:
+            self.chargepos, self.discharge = findcharge(self.df,minlength = self.minlength)
+            if len(self.chargepos) != 0:
+                self.chargeinfo = chargeinfo(self.df, self.chargepos, self.ratedc,self.imei)
+                
+            else:
+                self.chargepos = None
+                self.discharge=None
+                self.chargeinfo=None
+                
+    def addq(self,spercent=0.8,epercent=0.2,sv = None,sm=None,ssoc =None,ev=None,em=None,esoc=None,a = None,pma=0.1):
+        '''方法
+            addq(): 根据df属性的经过初始化的dataframe和chargeinfo进行计算，加入容量字段，将结果以list形式保存在charge属性中
+            
+            input:
+                spercent 起始电压分位数百分比 可选 默认0.8\n
+                epercent 结束电压分位数百分比 可选 默认0.2\n
+                sv 起始电压 可选 默认None\n
+                sm 起始最大单体电压 可选 默认None\n
+                ev 结束电压 可选 默认None\n
+                em 结束最大单体电压 可选 默认None\n
+                a 电流 可选 默认None\n
+                pma 电流正负范围百分比 可选 默认0.1
+                
+            output:
+                v新增属性：
+                chargeinfo 添加固定充电容量、温升速率的charge表 dataframe \n
+                qrstartv 固定充电容量计算方法1的起始电压值 \n
+                qccendv 固定充电容量计算方法1的终止电压值 \n
+                qrstartm 固定充电容量计算方法2的起始电压值 \n
+                qccendm 固定充电容量计算方法2的终止电压值 \n
+                qamp 固定充电容量计算的电流\n
+                qpm 固定充电容量计算的电流正负范围百分比\n
+                startsoc 固定SOC充电容量计算的起始SOC\n
+                endsoc 固定SOC充电容量计算的截止SOC\n
+        '''
+        if (self.df is not None) and (self.chargeinfo is not None) and (len(self.chargeinfo) != 0): 
+            #未加入fixedmq容量计算方法，不输出self.qrstartm, self.qccendm,            
+            self.chargeinfo, self.qrstartv, self.qccendv,  self.qamp, self.qpm, self.startsoc,self.endsoc = findq(self.df, self.chargeinfo,spercent=0.8,epercent=0.2,sv = sv,sm=sm,ssoc = ssoc,ev=ev,em=em,esoc=esoc,a = a,pma=pma)
+        else:
+            self.qrstartv, self.qccendv, self.qrstartm, self.qccendm, self.qamp, self.qpm,self.startsoc,self.endsoc  =  None, None, None, None, None, None,None,None
+    def stats(self,templim):
+        '''方法
+                stats(): 根据df和charge属性中的所有信息进行计算，统计出所有其他变量，结果保存在多个属性中，内容见下\n
+                soccum: soc在某区间累积时间占比\n
+                tempcum: 温度在某区间累积时间占比\n
+                curbyday:  每日电流情况\n
+                tempbyday: 每日温度情况\n
+                stop: 静置段信息\n
+                Temp: 在线日温度信息\n
+                constant: 充电信息\n
+                dischargetimes: 放电信息\n
+                onlinedateStats: 在线情况\n
+                （后续加入更多统计项目）
+                
+            input:
+                templim=[低温一级告警值,5,25,40,高温一级告警] 温度统计范围，若仅运行vehicle,则以默认值[-40,5,25,40,60]运行；若与batch类或batchPlot共同使用，
+                则使用该版本的温度告警上下限作为两端阈值，仅需输入除阈值外的3个温度段分割值
+                
+            output:
+                v新增属性：
+#                chargeinfo 添加固定温升速率的charge表 dataframe \n
+                 onlinedate 车辆在线日期表 dataframe
+                 
+           self.summary字段含义：
+               temp0_:temp0，即温度在低于-40的次数占总研究时间内温度出现次数的百分比 float64\n
+               temp0_1：temp1，即温度在[-40,5]的次数占总研究时间内温度出现次数的百分比  float64\n
+               temp1_2：temp3，即温度在[5,25]的次数占总研究时间内温度出现次数的百分比  float64\n
+               temp2_3：temp4，即温度在[25,40]的次数占总研究时间内温度出现次数的百分比 float64\n
+               temp3_4：temp5，即温度在[40,60]的次数占总研究时间内温度出现次数的百分比 float64\n
+               temp4：temp6，即温度在高于60的次数占总研究时间内温度出现次数的百分比 float64\n
+               temptotaltime：temp_totaltime，即总研究时间内各个温度出现次数 int32\n
+               dis05ratedc:电流<0.5个额定容量个数 int64\n
+               dis10ratedc:电流>0.5个<1个额定容量个数 int64\n
+               dis15ratedc：电流>1个<1.5个额定容量个数 int64\n
+               dis20ratedc:电流>1.5个<2个额定容量个数 int64\n
+               dis25ratedc:电流>2个<2.5个额定容量个数 int64\n
+               dis30ratedc:电流>2.5个额定容量个数 int64\n
+        '''
+        if (self.df is not None) and (self.chargeinfo is not None) and (len(self.chargeinfo) != 0): 
+            self.soccum = soccum(self.df)
+            self.tempcum = tempcum(self.df,templim=templim)
+            self.curbyday=curbyday(self.df)
+            self.tempbyday=tempbyday(self.df, self.imei)
+            self.stop=stop(self.df)
+            self.Temp=Temp(self.df)
+            self.constant=constant(self.df,self.chargeinfo,self.ratedc)
+            self.dischargetimes=dischargetimes(self.discharge,self.ratedc)
+            self.summary = pd.DataFrame({'imei':self.imei,'qrstartv':self.qrstartv,'qccendv':self.qccendv,'qamp':self.qamp,'qpm':self.qpm,
+                                         'temp0_':self.tempcum[0],'temp0_1':self.tempcum[1],'temp1_2': self.tempcum[2],'temp2_3':self.tempcum[3],'temp3_4':self.tempcum[4],'temp4':self.tempcum[5],
+                                         'temptotaltime':self.tempcum[6],'alithiumplatingevent':self.constant[0],'adW':self.constant[1],
+                                         'afsrate':self.constant[2],'chardur':self.constant[3],'chargetimes':self.constant[4],'dis05ratedc':self.dischargetimes[0],
+                                         'dis10ratedc':self.dischargetimes[1],'dis15ratedc':self.dischargetimes[2],'dis20ratedc':self.dischargetimes[3],'dis25ratedc':self.dischargetimes[4],
+                                         'dis30ratedc':self.dischargetimes[5]},index=[self.imei])
+
+            self.onlinedate = onlinedateStats(self.df,self.imei)   
+            
+        else:
+            self.soccum = None
+            self.tempcum = None
+            self.stop=None
+            self.curbyday=None
+            self.Temp=None
+            self.constant= None
+            self.dischargetimes= None
+          
+    def run(self):
+        '''方法
+            run(): initialize()，findcharge()，addq(),stats()的直接封装，按顺序和默认参数执行
+        '''
+        self.initialize()
+        self.findcharge()
+        self.addq()
+        self.stats()
