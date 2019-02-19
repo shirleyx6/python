@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Tue Sep 26 13:52:54 2017
-
-@author: luhongkai
 """
 import os
 import re
