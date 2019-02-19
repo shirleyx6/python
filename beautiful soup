@@ -1,0 +1,238 @@
+#all
+import urllib
+import os
+from bs4 import BeautifulSoup
+
+def get_content(url):
+    html=urllib.request.urlopen(url)
+    content=html.read().decode('utf-8')
+    html.close()
+    return content
+    
+start = 1
+end = 80
+def getAllImageLink(type1):
+    for i in range(start, end + 1):
+        url = 'http://konachan.net/post?page=%d&tags=' % i
+        html = urllib.request.urlopen(url).read().decode('utf-8')
+        soup = BeautifulSoup(html)#lxml，html
+
+        all_img = soup.findAll('img')#不带http的图片爬取失败
+    #    liResult = soup.findAll('img')#,attrs={"class":"content_image lazy"})#class 抓取的文档里面找
+        x=0
+        for image in all_img:
+            try:
+                link = image[type1]
+            except:
+                link='http:'+image[type1]
+    #        imageName = image.get('username')
+            filesavepath = 'E:/ali/DCGAN/%s.jpg' % x
+            try:
+                urllib.request.urlretrieve(link,filesavepath)
+            except:
+                urllib.request.urlretrieve('http:'+link,filesavepath)
+            x+=1
+         
+if __name__ == '__main__':
+    getAllImageLink(type1='src')
+  
+print (u'-------网页图片抓取-------')        
+print (u'请输入url:')
+url=input()
+if url:
+    pass
+else:
+    print (u'---没有地址输入正在使用默认地址---')
+    url='http://sc.chinaz.com/tupian/fengyetupian.html'
+
+print (u'----------正在获取网页---------')
+info=get_content(url)
+pageFile=open('E:/学习中/pachong/10_17/page.txt','w',encoding="utf-8")
+pageFile.write(info)
+pageFile.close()
+
+#pic
+def getAllImageLink(url,type1):
+    html = urllib.request.urlopen(url).read().decode('utf-8')
+    soup = BeautifulSoup(html)#lxml，html
+    
+    all_img = soup.findAll('img')#不带http的图片爬取失败
+#    liResult = soup.findAll('img')#,attrs={"class":"content_image lazy"})#class 抓取的文档里面找
+    print (len(all_img))
+
+    x=0
+    for image in all_img:
+        try:
+            link = image[type1]
+        except:
+            link='http:'+image[type1]
+#        imageName = image.get('username')
+        filesavepath = 'E:/学习中/pachong/10_17/%s.jpg' % x
+        try:
+            urllib.request.urlretrieve(link,filesavepath)
+        except:
+            urllib.request.urlretrieve('http:'+link,filesavepath)
+        x+=1
+        
+print (u'-------网页图片抓取-------')        
+print (u'请输入url:')
+url=input()
+if url:
+    pass
+else:
+    print (u'---没有地址输入正在使用默认地址---')
+    url='http://sc.chinaz.com/tupian/fengyetupian.html'
+
+print (u'----------正在获取网页---------')
+info=get_content(url)
+pageFile=open('E:/学习中/pachong/10_17/page.txt','w',encoding="utf-8")
+pageFile.write(info)
+pageFile.close()
+
+print (u'----------正在下载图片---------')
+if __name__ == '__main__':
+    getAllImageLink(url,type1='src')
+print (u'-----------下载成功-----------')
+
+#尝试抓取下一页      
+try:
+    nextHtml=soup.find_all('a',attrs={'class':'nextpage'})[0].get('href')
+    if nextHtml:
+        nextlink='https://tieba.baidu.com/p/'+nextHtml
+        getAllImageLink(nextlink)
+except:
+    print('---end---')
+    
+#grab the keywords/participle===jieba
+import urllib
+import urllib.request
+
+data={}
+data['word']='易烊千玺'
+
+url_values=urllib.parse.urlencode(data)#)#urlencode:把普通字符串转化为url格式
+url='http://www.baidu.com/s?'
+full_url=url+url_values
+
+data=urllib.request.urlopen(full_url).read()
+data=data.decode('UTF-8')
+pageFile=open('E:/学习中/pachong/10_17/qianxi.txt','w',encoding="utf-8")
+pageFile.write(data)
+pageFile.close()
+
+#获取网页内容并分词
+import urllib#用于获得网页内容
+import re#用正则表达式提取中文字符
+import time
+import jieba#用于分词
+
+#本地文件提取关键词
+import os
+f=open('')
+f = open("E:/西方哲学史.txt",'r')
+f = f.read()
+seg_list = jieba.cut(f)
+print("jingque:","/".join(seg_list))
+import jieba.analyse
+tags = jieba.analyse.extract_tags(f,topK = 10)
+print("Keyword:","/".join(tags))
+
+#1.精确模式，试图将句子最精确地切开，适合文本分析；
+#2.全模式，把句子中所有的可以成词的词语都扫描出来, 速度非常快，但是不能解决歧义；
+#3.搜索引擎模式，在精确模式的基础上，对长词再次切分，提高召回率，适合用于搜索引擎分词。
+#4、支持繁体分词，支持自定义词典
+import jieba
+seg_list=jieba.cut('我来到北京清华大学',cut_all=True)
+print('Full Mode:'+'/'.join(seg_list))# 全模式
+#相较更实用
+seg_list = jieba.cut("我来到北京清华大学", cut_all=False)
+print("Default Mode: " + "/ ".join(seg_list))  # 精确模式
+#最简单方式-da call
+seg_list = jieba.cut("他来到了网易杭研大厦")  # 默认是精确模式
+print(", ".join(seg_list))
+################666666666666666666666666666666
+seg_list = jieba.cut_for_search("小明硕士毕业于中国科学院计算所，后在日本京都大学深造")  # 搜索引擎模式
+print(", ".join(seg_list))
+
+#基于TF-IDF算法的关键词抽取-频率
+import jieba
+import jieba.analyse
+sentence='全国港澳研究会会长徐泽在会上发言指出，\
+学习系列重要讲话要深刻领会 \
+主席关于香港回归后的宪制基础和宪制秩序的论述，\
+这是过去20年特别是中共十八大以来"一国两制"在香港实践取得成功的根本经验。\
+首先，要在夯实 香港的宪制基础、巩固香港的宪制秩序上着力。\
+只有牢牢确立起"一国两制"的宪制秩序，才能保证"一国两制"实践不走样 、不变形。\
+其次，要在完善基本法实施的制度和机制上用功。\
+中央直接行使的权力和特区高度自治权的结合是特区宪制秩 序不可或缺的两个方面，\
+同时必须切实建立以行政长官为核心的行政主导体制。第三，要切实加强香港社会特别是针对公 \
+职人员和青少年的宪法、基本法宣传，牢固树立"一国"意识，\
+坚守"一国"原则。第四，要努力在全社会形成聚焦发展、抵 制泛政治化的氛围和势能，\
+全面准确理解和落实基本法有关经济事务的规定，使香港继续在国家发展中发挥独特作用并由 \
+此让最广大民众获得更实在的利益。'
+
+# sentence ：为待提取的文本
+# topK： 为返回几个 TF/IDF 权重最大的关键词，默认值为 20
+# withWeight ： 为是否一并返回关键词权重值，默认值为 False
+# allowPOS ： 仅包括指定词性的词，默认值为空，即不筛选
+
+key_words=jieba.analyse.extract_tags(sentence,topK=10,withWeight=True,allowPOS=('n','nr','ns'))
+for item in key_words:
+    print(item[0],item[1])
+    
+#基于TextRank算法的关键词抽取
+#将待抽取关键词的文本进行分词，以固定窗口大小(默认为5，通过span属性调整)，词之间的共现关系，构建图
+#计算图中节点的PageRank，注意是无向带权图
+keywords = jieba.analyse.textrank(sentence, topK=10, withWeight=True, allowPOS=('n','vn','ns','v'))
+for item in keywords:
+    print(item[0],item[1])
+    
+#词性标注
+#jieba.posseg.POSTokenizer(tokenizer=None) 新建自定义分词器，tokenizer 参数可指定内部使用的 jieba.Tokenizer 分词器。jieba.posseg.dt 为默认词性标注分词器。
+#标注句子分词后每个词的词性，采用和 ictclas 兼容的标记法。
+import jieba.posseg as pseg
+words=pseg.cut('我爱北京天安门')
+for word,flag in words:
+    print('%s %s'%(word,flag))
+    
+#jieba 实现关键词提取
+#1.读取一个用户的全部数据时,注意区分read(), readline()和readlines()的区别,
+#read()读取文件全部内容并存在一个字符串变量中,
+#readline()每次只读取文件里面的一行,
+#readlines()返回一个行的列表。
+#2.注意将一个列表以字符串表达的写法:','.join(list).例如:list = [1,2,3],则可输出1,2,3
+import sys
+import jieba
+import os
+import jieba.analyse
+import importlib
+
+importlib.reload(sys)
+top_num=30
+
+source_dir='./result_all'
+topic_dir='./'
+topic_file='E:/学习中/pachong/10_17/qianxi.txt'
+
+def get_topic():
+    print('Start process...')
+    topic_filename=os.path.join(topic_dir,topic_file)
+    if(os.path.exists(topic_filename)):
+        print(topic_filename+'exists!')
+        os.remove(topic_filename)
+    file_writer=file(topic_filename,'w')
+    
+    for dirpaths,dirnames,files in os.walk(source_dir):
+        for item in files:
+            user_id=item.split('.')[0]
+            file_name=os.path.join(source_dir,item)
+            content=open(file_name,'r').read()
+            tags=jieba.analyse.extract_tags(content,top_num)
+            line='用户'+user_id+'的关键词为：'+','.join(tags)
+            file_writer.writelines(line+'\n')
+    print('Finished!')
+    
+if __name__=='__main__':
+    print('go')
+    get_topic()
+
