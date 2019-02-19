@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Aug  7 13:12:16 2017
-
-@author: ganshi
 """
 
 import matplotlib.pyplot as plt
