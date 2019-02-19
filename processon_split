@@ -1,0 +1,30 @@
+import os
+import pandas as pd
+import numpy as np
+
+inPath='file:///Z:/test/sver_3130_21cars_20180723_chrcap.csv'
+outPath='E:/538121'
+def  bigtable_split(inPath,outPath):
+    '''
+    inPath 全表路径
+    
+    outPath 文件夹路径，拆分后的每个imei子表存储的版本文件夹
+    '''
+    chunksize=10000000#默认分块大小500万行,估计占用内存500M
+    chunks = pd.read_csv(inPath,chunksize=chunksize)
+    # chunk = chunks.get_chunk(50000)
+    # print (chunk)
+    
+    for chunk in chunks:#按块大小均分，每个块都是df
+        chunk.columns=['imei','time_in','time_data','nserial','sumvolt','ncurrent','soc','chrcap','chrcycle','dischcap','dischcycle','cellnum','packstate',
+'cell_volt177','cell_volt178','cell_volt179','cell_volt180'
+]
+        cg=chunk.groupby('imei')
+        for i in chunk.imei.unique():
+            df=cg.get_group(i)
+            if os.path.exists(outPath+'/%s.csv'%i):#已经存在不添加列名
+                df.to_csv(outPath+'/%s.csv'%i,mode='a',index=False,header=False)
+            else:
+                df.to_csv(outPath+'/%s.csv'%i,mode='a',index=False,header=True)
+                
+    return 
