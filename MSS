@@ -1,0 +1,123 @@
+# -*- coding: utf-8 -*-
+
+import pandas as pd
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.style.use('KLplot')
+from scipy.stats import norm
+from sklearn.cluster import KMeans
+from sklearn.neighbors import LocalOutlierFactor
+
+class FaultDiagnosis():
+    
+    def __init__(self, x_in):
+        
+        self.df = pd.DataFrame()
+        self.MSSdf = pd.DataFrame()
+        self.COFtdf = pd.DataFrame()
+        self.COFdf = pd.DataFrame()
+        R = ['R' + str(ii+1) for ii in range(len(list(vehicle))-1)]
+        for ii in range(len(x_in)):
+            # [1:] to exclude first line of date
+            self.MSSdf.loc[:,ii] = self.runMSS(x_in.loc[ii,:][1:], plot=False, beta=3)
+            # [0] is COF table which do not need to be saved
+#            self.COFtdf.loc[:,ii] = self.COF(x_in.loc[ii,:][1:], k=3, beta=3)[0]
+            self.COFdf.loc[:,ii] = self.COF(x_in.loc[ii,:][1:], k=3, beta=3)[1]
+            print(ii+1, '/', len(x_in))
+        self.MSSdf = self.MSSdf.T
+        self.COFdf = self.COFdf.T
+#        self.COFtdf = self.COFtdf.T
+        self.ypdf = self.LOF(x_in)
+        self.MSSdf.columns = R
+        self.COFdf.columns = R
+#        self.COFtdf.columns = R
+        self.ypdf.columns = R
+
+        self.allFF = pd.DataFrame()
+        self.allFF.loc[:,'MSS'] = self.MSSdf.sum() / len(x_in)
+        self.allFF.loc[:,'COF'] = self.COFdf.sum() / len(x_in)
+        self.allFF.loc[:,'LOF'] = self.ypdf.sum() / len(x_in)        
+        
+            
+    def mss(self, x, beta):
+        mu, std = norm.fit(x)
+        if std > 0:
+            newx = x[abs(x-mu) < beta*std]
+        else:
+            newx = x
+        return newx, mu, std
+    
+    def runMSS(self, x, plot=True, beta=3):
+        xs = x[:]
+        while True:
+            new_x, mu, std = self.mss(x, beta)
+            print(len(new_x),len(x),len(xs))
+            if (len(new_x) == len(x)):
+                break
+            x = new_x
+        if plot:
+            plt.hist(x, normed=True)
+            xmin,xmax = plt.xlim()
+            x_axis = np.linspace(xmin,xmax,100)
+            p = norm.pdf(x_axis,mu,std)
+            plt.plot(x_axis,p,'k',linewidth=2)
+        self.mu_MSS = mu
+        self.std_MSS = std
+        if std == 0:
+            std = 0.01
+        return (abs(xs-mu) >= beta*std) * 1
+        
+    def KMeancluster(self, x, k=3):
+        km = KMeans(n_clusters=k, init='random', copy_x=True)
+        x = x.values.reshape(-1,1)
+        km_x = km.fit(x)
+        return km_x
+    
+    def COF(self, x, k=3, beta=3):
+        km_x = self.KMeancluster(x,k)
+        unique, counts = np.unique(km_x.labels_, return_counts=True)
+        x_array = np.array(x)
+        dis = abs(x_array - km_x.cluster_centers_)
+        counts.reshape(1,3)
+        COF = np.dot(counts,dis)/counts.sum()
+        COFR = self.COF_R(COF, beta)
+        return COF, COFR
+    
+    def COF_R(self, COF, beta=3):
+        nCOF, mu, std = self.mss(COF, beta)
+        self.mu_cof = mu
+        self.std_cof = std
+        return (abs(COF-mu) >= beta*std) * 1
+    
+    def LOF(self, x, n_neighbors=35):
+        Xs = np.array([[],[]])
+#        for i in range(len(list(x))-1):
+        for i in range(len(list(vehicle))-1):
+            X = np.array([np.arange(len(x)), x[i+1]])
+            Xs = np.concatenate([Xs,X], axis=1)
+        clf = LocalOutlierFactor(n_neighbors=n_neighbors)
+        yp = clf.fit_predict(Xs.T)
+        ypdf = pd.DataFrame()
+        for i in range(len(list(x))-1):
+            ypdf.loc[:,i] = yp[(i*len(x)):((i+1)*len(x))]
+        ypdf = (1-ypdf)/2
+        return ypdf
+    
+    def plot(self):
+        xais = np.arange(len(self.allFF))
+        xais = xais + 1
+        style=['ko-','bo-','go--']
+        alphas=[0.8,0.5,0.5]
+        	
+        plt.figure(figsize=(20,10))
+        for i in range(len(list(self.allFF))):
+            plt.plot(xais,self.allFF.iloc[:,i],style[i],alpha=alphas[i])
+        plt.xlabel('Cell')
+        plt.ylabel('Fault Frequency')
+        plt.legend()
+        
+vehicle = pd.read_excel('D:/Fault Diagnosis/MSS/test.xlsx')
+fd = FaultDiagnosis(vehicle)
+fd.plot()
+
